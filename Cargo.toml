@@ -1,0 +1,8 @@
+[package]
+name = "minimal-left-right"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+spin = { version = "0.10", default-features = false, features = ["mutex","spin_mutex","rwlock"]}
+
