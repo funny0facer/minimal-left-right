@@ -26,26 +26,27 @@ pub struct LeftRightBuffer<T> {
     left: RwLock<T>,
     right: RwLock<T>,
 
-    // true means reading happens on right and writing on the left
-    // false means reading happens on left and writing on the right
+    // True means reading happens on right and writing on the left
+    // False means reading happens on left and writing on the right
     direction: AtomicBool,
     has_been_published: AtomicBool,
 }
 
 impl<T: Copy> LeftRightBuffer<T> {
-    pub const fn new(default: T) -> LeftRightBuffer<T> {
+    /// Generates a new [`LeftRightBuffer`] and takes the data.
+    pub const fn new(data: T) -> LeftRightBuffer<T> {
         LeftRightBuffer {
-            left: RwLock::new(default),
-            right: RwLock::new(default),
+            left: RwLock::new(data),
+            right: RwLock::new(data),
             direction: AtomicBool::new(false),
             has_been_published: AtomicBool::new(false),
         }
     }
 
-    /// returns a read guard.
+    /// Returns a read guard.
     ///
-    /// Under the circumstance that read gets called between publish() and the drop of the write mutex, it shall return the old value.
-    /// The risk of this circumstance gets minimized by the fact that publish() will drop the write mutex itself if used correctly.
+    /// Under the circumstance that read gets called between [`publish()`][LeftRightBuffer::publish] and the drop of the write mutex, it shall return the old value.
+    /// The risk of this circumstance gets minimized by the fact that [`publish()`][LeftRightBuffer::publish] will drop the write mutex itself if used correctly.
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         match self.direction.load(Ordering::Relaxed) {
             READ_RIGHT => match self.right.try_read() {
@@ -59,14 +60,14 @@ impl<T: Copy> LeftRightBuffer<T> {
         }
     }
 
-    /// returns a write guard
+    /// Returns a write guard
     ///
     /// The first call of this function after a publish syncs the 'last written data' to the 'to be written' data.
-    /// This enables easy modification of partial data.
+    /// This is only true if [`write_without_sync()`][LeftRightBuffer::write_without_sync] was not used in between.
+    /// This function enables easy modification of partial data.
     ///
-    /// # Safety
-    ///  `write` shall only be called from the lower priority task, otherwise it might panic as this could violate the assumptions.
-
+    /// # Panics
+    /// This function shall only be called from the lower priority task, otherwise it might panic as this could violate the assumptions.
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         if self.has_been_published.load(Ordering::Relaxed) {
             self.sync();
@@ -84,11 +85,12 @@ impl<T: Copy> LeftRightBuffer<T> {
         }
     }
 
-    /// returns a write guard
+    /// Returns a write guard
     ///
-    /// # Safety
-    ///  `write` shall only be called from the lower priority task, otherwise it might panic as this could violate the assumptions.
+    /// # Panics
+    /// This function shall only be called from the lower priority task, otherwise it might panic as this could violate the assumptions.
     pub fn write_without_sync(&self) -> RwLockWriteGuard<'_, T> {
+        self.has_been_published.store(false, Ordering::Relaxed);
         match self.direction.load(Ordering::Relaxed) {
             WRITE_LEFT => match self.left.try_write() {
                 Some(thing) => thing,
@@ -101,28 +103,24 @@ impl<T: Copy> LeftRightBuffer<T> {
         }
     }
 
-    /// syncs the data between left & right
+    /// Syncs the data between left & right
     fn sync(&self) {
         match self.direction.load(Ordering::Relaxed) {
             WRITE_LEFT => {
-                let old_data = match self.right.try_read() {
-                    Some(thing) => thing,
-                    None => panic!("LRBuffer sync1"),
+                let Some(old_data) = self.right.try_read() else {
+                    panic!("LRBuffer sync1")
                 };
-                let mut new_data = match self.left.try_write() {
-                    Some(thing) => thing,
-                    None => panic!("LRBuffer sync2"),
+                let Some(mut new_data) = self.left.try_write() else {
+                    panic!("LRBuffer sync2")
                 };
                 *new_data = *old_data;
             }
             WRITE_RIGHT => {
-                let old_data = match self.left.try_read() {
-                    Some(thing) => thing,
-                    None => panic!("LRBuffer sync3"),
+                let Some(old_data) = self.left.try_read() else {
+                    panic!("LRBuffer sync3")
                 };
-                let mut new_data = match self.right.try_write() {
-                    Some(thing) => thing,
-                    None => panic!("LRBuffer sync4"),
+                let Some(mut new_data) = self.right.try_write() else {
+                    panic!("LRBuffer sync4")
                 };
                 *new_data = *old_data;
             }
@@ -130,25 +128,26 @@ impl<T: Copy> LeftRightBuffer<T> {
     }
 
     /// This method guarantees that the old writer is dropped before the new readers get active.
-    /// For this to work correctly, the caller must transfer the correct Guard.
+    /// For this to work correctly, the caller must transfer the correct guard.
     pub fn publish(&self, writer: RwLockWriteGuard<'_, T>) {
         drop(writer);
-        match self.direction.load(Ordering::Acquire) {
-            true => self.direction.store(false, Ordering::Release),
-            false => self.direction.store(true, Ordering::Release),
+        if self.direction.load(Ordering::Acquire) {
+            self.direction.store(false, Ordering::Release);
+        } else {
+            self.direction.store(true, Ordering::Release);
         }
+
         self.has_been_published.store(true, Ordering::Relaxed);
     }
 
-    /// # DO NOT USE!
-    /// only inside for educational purpose.
-    #[deprecated(note = "please use `publish(&self, writer: RwLockWriteGuard<'_, T>)` instead")]
-    fn _old_publish(&self) {
-        match self.direction.load(Ordering::Acquire) {
-            true => self.direction.store(false, Ordering::Release),
-            false => self.direction.store(true, Ordering::Release),
-        }
-        self.has_been_published.store(true, Ordering::Relaxed);
+    #[cfg(test)]
+    fn direction(&self) -> &AtomicBool {
+        &self.direction
+    }
+
+    #[cfg(test)]
+    fn has_been_published(&self) -> &AtomicBool {
+        &self.has_been_published
     }
 }
 
@@ -182,31 +181,8 @@ mod tests {
     }
 
     #[test]
-    fn test_interruption() {
-        let global = LR_BUFFER.lock();
-        {
-            // Low Prio Task
-            let mut foo = global.write();
-            *foo = 1;
-            global.publish(foo);
-        }
-        assert_leftright_eq(&global, 1);
-        {
-            // Low Prio Task
-            let mut foo = global.write();
-            *foo = 2;
-            {
-                // Interruption from High Prio Task. High Prio Task reads old value
-                assert_leftright_eq(&global, 1);
-            }
-            global.publish(foo);
-        }
-        assert_leftright_eq(&global, 2);
-    }
-
-    #[test]
     #[should_panic(expected = "LRBuffer write")] //depending on the circumstances, it could be "LRBuffer write1" or "LRBuffer write2"
-    fn test_second_writer_panics() {
+    fn a_second_writer_panics() {
         let global = LR_BUFFER.lock();
         {
             // Low Prio Task
@@ -221,39 +197,130 @@ mod tests {
     }
 
     #[test]
-    fn test_interruption2() {
+    fn test_interruption_before_and_after_publish() {
         let global = LR_BUFFER.lock();
         {
             // Low Prio Task
             let mut foo = global.write();
-            *foo = 11;
+            *foo = 10;
             global.publish(foo);
         }
         {
             // Low Prio Task
             let mut foo = global.write();
-            *foo = 1;
+            *foo = 20;
+            {
+                // High Prio Task
+                // before publish
+                assert_leftright_eq(&global, 10);
+            }
             global.publish(foo);
-            assert_leftright_eq(&global, 1);
+            {
+                // High Prio Task
+                // after publish
+                assert_leftright_eq(&global, 20);
+            }
+        }
+        {
+            // High Prio Task
+            // After Low Prio Task
+            assert_leftright_eq(&global, 20);
         }
     }
 
     #[test]
-    fn test_old_publish_method() {
+    fn test_interruption_during_publish() {
         let global = LR_BUFFER.lock();
         {
             // Low Prio Task
             let mut foo = global.write();
-            *foo = 11;
+            *foo = 30;
             global.publish(foo);
         }
         {
             // Low Prio Task
             let mut foo = global.write();
-            *foo = 1;
-            #[allow(deprecated)]
-            global._old_publish();
-            assert_leftright_eq(&global, 11); // still the old value. This is described in the read function.
+            *foo = 40;
+
+            // simulate the interuption within "publish()"
+            drop(foo);
+            {
+                // High Prio Task
+                assert_leftright_eq(&global, 30);
+            }
+
+            if global.direction().load(Ordering::Acquire) {
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 30);
+                }
+                global.direction().store(false, Ordering::Release);
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 40);
+                }
+            } else {
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 30);
+                }
+                global.direction().store(true, Ordering::Release);
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 40);
+                }
+            }
+            global.has_been_published().store(true, Ordering::Relaxed);
+            {
+                // High Prio Task
+                assert_leftright_eq(&global, 40);
+            }
         }
+        assert_leftright_eq(&global, 40);
+    }
+
+    #[test]
+    fn simulate_publish_without_drop() {
+        let global = LR_BUFFER.lock();
+        {
+            // Low Prio Task
+            let mut foo = global.write();
+            *foo = 50;
+            global.publish(foo);
+        }
+        {
+            // Low Prio Task
+            let mut foo = global.write();
+            *foo = 60;
+
+            if global.direction().load(Ordering::Acquire) {
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 50);
+                }
+                global.direction().store(false, Ordering::Release);
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 50);
+                }
+            } else {
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 50);
+                }
+                global.direction().store(true, Ordering::Release);
+                {
+                    // High Prio Task
+                    assert_leftright_eq(&global, 50);
+                }
+            }
+            global.has_been_published().store(true, Ordering::Relaxed);
+            {
+                // High Prio Task
+                // still the old value!
+                assert_leftright_eq(&global, 50);
+            }
+        }
+        assert_leftright_eq(&global, 60);
     }
 }
