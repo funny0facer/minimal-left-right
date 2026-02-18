@@ -2,6 +2,11 @@
 name = "minimal-left-right"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Single Producer Multiple Consumer container for no_std and no alloc"
+repository = "https://github.com/funny0facer/minimal-left-right"
+homepage = "https://github.com/funny0facer/minimal-left-right"
+keywords = ["no_std","no_alloc","SPMC"]
 
 [dependencies]
 spin = { version = "0.10", default-features = false, features = [
@@ -9,6 +14,7 @@ spin = { version = "0.10", default-features = false, features = [
     "spin_mutex",
     "rwlock",
 ] }
+
 
 [lints.rust]
 missing_docs = "warn"

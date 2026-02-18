@@ -1,17 +1,19 @@
 #![no_std]
 
-//! The main struct of this crate owns the same data twice. One for reading and one for writing. It is inspired by the [left-right](https://crates.io/crates/left-right). This crate works in a `no_std` environment by using the lock mechanisms of [spin](https://crates.io/crates/spin).
+//! The main struct of this crate owns the same data twice. One for reading and one for writing. 
+//! It is loosely inspired by the [left-right](https://crates.io/crates/left-right) crate. 
+//! This crate works in a `no_std` environment by using the lock mechanisms of the [spin](https://crates.io/crates/spin) crate.
 //!
-//! This struct is meant to be used as Single Producer Multiple Consumer (SPMC). Think of it as a communication agent from a lower priority task to a higher priority task. As this is a design without a queue, the last writer wins.
+//! This struct is meant to be used as Single Producer Multiple Consumer (SPMC). Think of it as a communication agent from a lower priority task to a higher priority task. 
 //!
 //! # Assumptions
-//! - The implementaion assumes a single core environment.
+//! - The implementation assumes a single core environment.
 //! - The writer thread shall never interrupt a reader thread.
 //! - There is only 1 writer at the same time.
 //!
 //! # Guarantees
 //! - Simultaneous readers can coexist safely
-//! - Potential deadlock situations (which can only occur if the assumptions were violated) directly implement a panic!
+//! - Potential deadlock situations (which can only occur if the assumptions were violated) directly implement a panic! This is intentional to fail fast instead of failing in production.
 //!
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -46,7 +48,7 @@ impl<T: Copy> LeftRightBuffer<T> {
     /// Returns a read guard.
     ///
     /// Under the circumstance that read gets called between [`publish()`][LeftRightBuffer::publish] and the drop of the write mutex, it shall return the old value.
-    /// The risk of this circumstance gets minimized by the fact that [`publish()`][LeftRightBuffer::publish] will drop the write mutex itself if used correctly.
+    /// The "risk" of this circumstance gets minimized by the fact that [`publish()`][LeftRightBuffer::publish] will drop the write mutex itself if used correctly.
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         match self.direction.load(Ordering::Relaxed) {
             READ_RIGHT => match self.right.try_read() {
@@ -64,7 +66,7 @@ impl<T: Copy> LeftRightBuffer<T> {
     ///
     /// The first call of this function after a publish syncs the 'last written data' to the 'to be written' data.
     /// This is only true if [`write_without_sync()`][LeftRightBuffer::write_without_sync] was not used in between.
-    /// This function enables easy modification of partial data.
+    /// This function enables easy modification of partial data of T.
     ///
     /// # Panics
     /// This function shall only be called from the lower priority task, otherwise it might panic as this could violate the assumptions.
@@ -86,6 +88,8 @@ impl<T: Copy> LeftRightBuffer<T> {
     }
 
     /// Returns a write guard
+    /// 
+    /// Use this function instead of [`write()`][LeftRightBuffer::write], when you want to write T independent of the prior state of T.
     ///
     /// # Panics
     /// This function shall only be called from the lower priority task, otherwise it might panic as this could violate the assumptions.
@@ -156,27 +160,32 @@ mod tests {
     use super::*;
     use spin::Mutex;
 
-    // the mutex is only here to simulate the assumption of a single core.
-    static LR_BUFFER: Mutex<LeftRightBuffer<u32>> = Mutex::new(LeftRightBuffer::new(0));
+    #[derive(Clone, Copy)]
+    struct VeryComplexData{
+        pub a: u32,
+    }
 
-    fn assert_leftright_eq(global: &spin::MutexGuard<'_, LeftRightBuffer<u32>>, cmp: u32) {
+    // The Mutex in this test is only used to simulate the assumption of a single core.
+    static LR_BUFFER: Mutex<LeftRightBuffer<VeryComplexData>> = Mutex::new(LeftRightBuffer::new(VeryComplexData{a:0}));
+
+    fn assert_leftright_eq(global: &spin::MutexGuard<'_, LeftRightBuffer<VeryComplexData>>, cmp: u32) {
         let foo = global.read();
-        assert_eq!(*foo, cmp);
+        assert_eq!(foo.a, cmp);
     }
 
     #[test]
     fn test_autosync() {
         let global = LR_BUFFER.lock();
         {
-            // Low Prio Task 1
+            // Low Priority Task 1
             let mut foo = global.write();
-            *foo = 5;
+            foo.a = 5;
             global.publish(foo);
         }
         {
-            // Low Prio Task 2
+            // Low Priority Task 2
             let foo = global.write();
-            assert_eq!(*foo, 5);
+            assert_eq!(foo.a, 5);
         }
     }
 
@@ -185,13 +194,13 @@ mod tests {
     fn a_second_writer_panics() {
         let global = LR_BUFFER.lock();
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
             {
-                // Interruption from High Prio Task. High Prio Task tries to write as well. This will panic as this violates the assumptions.
+                // Interruption from High Priority Task. High Priority Task tries to write as well. This will panic as this violates the assumptions.
                 let _ = global.write();
             }
-            *foo = 1;
+            foo.a = 1;
             global.publish(foo);
         }
     }
@@ -200,30 +209,30 @@ mod tests {
     fn test_interruption_before_and_after_publish() {
         let global = LR_BUFFER.lock();
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
-            *foo = 10;
+            foo.a = 10;
             global.publish(foo);
         }
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
-            *foo = 20;
+            foo.a = 20;
             {
-                // High Prio Task
+                // High Priority Task
                 // before publish
                 assert_leftright_eq(&global, 10);
             }
             global.publish(foo);
             {
-                // High Prio Task
+                // High Priority Task
                 // after publish
                 assert_leftright_eq(&global, 20);
             }
         }
         {
-            // High Prio Task
-            // After Low Prio Task
+            // High Priority Task
+            // After Low Priority Task
             assert_leftright_eq(&global, 20);
         }
     }
@@ -232,47 +241,47 @@ mod tests {
     fn test_interruption_during_publish() {
         let global = LR_BUFFER.lock();
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
-            *foo = 30;
+            foo.a = 30;
             global.publish(foo);
         }
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
-            *foo = 40;
+            foo.a = 40;
 
-            // simulate the interuption within "publish()"
+            // simulate the interruption within "publish()"
             drop(foo);
             {
-                // High Prio Task
+                // High Priority Task
                 assert_leftright_eq(&global, 30);
             }
 
             if global.direction().load(Ordering::Acquire) {
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 30);
                 }
                 global.direction().store(false, Ordering::Release);
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 40);
                 }
             } else {
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 30);
                 }
                 global.direction().store(true, Ordering::Release);
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 40);
                 }
             }
             global.has_been_published().store(true, Ordering::Relaxed);
             {
-                // High Prio Task
+                // High Priority Task
                 assert_leftright_eq(&global, 40);
             }
         }
@@ -283,40 +292,40 @@ mod tests {
     fn simulate_publish_without_drop() {
         let global = LR_BUFFER.lock();
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
-            *foo = 50;
+            foo.a = 50;
             global.publish(foo);
         }
         {
-            // Low Prio Task
+            // Low Priority Task
             let mut foo = global.write();
-            *foo = 60;
+            foo.a = 60;
 
             if global.direction().load(Ordering::Acquire) {
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 50);
                 }
                 global.direction().store(false, Ordering::Release);
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 50);
                 }
             } else {
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 50);
                 }
                 global.direction().store(true, Ordering::Release);
                 {
-                    // High Prio Task
+                    // High Priority Task
                     assert_leftright_eq(&global, 50);
                 }
             }
             global.has_been_published().store(true, Ordering::Relaxed);
             {
-                // High Prio Task
+                // High Priority Task
                 // still the old value!
                 assert_leftright_eq(&global, 50);
             }
