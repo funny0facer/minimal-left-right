@@ -16,8 +16,10 @@ non_ascii_idents = "warn"
 unreachable_pub = "warn"
 
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
 match_bool = "allow"
+single_match_else = "allow"
+
+pedantic = { level = "warn", priority = -1 }
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 as_pointer_underscore = "warn"
