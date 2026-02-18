@@ -7,6 +7,9 @@ description = "Single Producer Multiple Consumer container for no_std and no all
 repository = "https://github.com/funny0facer/minimal-left-right"
 homepage = "https://github.com/funny0facer/minimal-left-right"
 keywords = ["no_std","no_alloc","SPMC"]
+exclude = [
+    "check-before-commit.sh",
+]
 
 [dependencies]
 spin = { version = "0.10", default-features = false, features = [
